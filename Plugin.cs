@@ -2,14 +2,22 @@
 using HarmonyLib;
 using Eremite;
 using Eremite.Controller;
+using Eremite.Services;
+using Eremite.Buildings;
+using Eremite.Characters;
+using System.Linq;
+using Eremite.Services.Monitors;
 
-namespace ModTemplate
-{
+namespace IdleNotify {
     [BepInPlugin(PluginInfo.PLUGIN_GUID, PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
         public static Plugin Instance;
         private Harmony harmony;
+
+        public static void Log(string str) {
+            Instance.Logger.LogInfo(str);
+        }
 
         private void Awake()
         {
@@ -18,25 +26,38 @@ namespace ModTemplate
             Logger.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
         }
 
-        [HarmonyPatch(typeof(MainController), nameof(MainController.OnServicesReady))]
+        [HarmonyPatch(typeof(MonitorsService), nameof(MonitorsService.CreateMonitors))]
         [HarmonyPostfix]
-        private static void HookMainControllerSetup()
-        { 
-            // This method will run after game load (Roughly on entering the main menu)
-            // At this point a lot of the game's data will be available.
-            // Your main entry point to access this data will be `Serviceable.Settings` or `MainController.Instance.Settings`
-            Instance.Logger.LogInfo($"Performing game initialization on behalf of {PluginInfo.PLUGIN_GUID}.");
-            Instance.Logger.LogInfo($"The game has loaded {MainController.Instance.Settings.effects.Length} effects.");
+        private static void MonitorsService_CreateMonitors_Postfix(MonitorsService __instance) {
+            __instance.monitors = __instance.monitors.Concat(new GameMonitor[] { new IdleBuildingMonitor() }).ToArray();
         }
 
-        [HarmonyPatch(typeof(GameController), nameof(GameController.StartGame))]
-        [HarmonyPostfix]
-        private static void HookEveryGameStart()
-        {
-            // Too difficult to predict when GameController will exist and I can hook observers to it
-            // So just use Harmony and save us all some time. This method will run after every game start
-            var isNewGame = MB.GameSaveService.IsNewGame();
-            Instance.Logger.LogInfo($"Entered a game. Is this a new game: {isNewGame}.");
+        [HarmonyPatch(typeof(ProductionBuilding), nameof(ProductionBuilding.IsBuildingIdle))]
+        [HarmonyPrefix]
+        private static bool ProductionBuilding_IsBuildingIdle_Prefix(ProductionBuilding __instance, ref bool __result) {
+            bool anyWorkerIdle = false;
+            foreach (int id in __instance.Workers) {
+                if (GameMB.ActorsService.HasActor(id)) {
+                    Actor actor = GameMB.ActorsService.GetActor(id);
+                    if (!actor.IsBoundToWorkplace) {
+                        if (!actor.ActorState.isWorking) {
+                            anyWorkerIdle = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if(!anyWorkerIdle) {
+                __instance.ProductionBuildingState.idleTime = 0f;
+                __result = false;
+                return false;
+            }
+
+            __instance.ProductionBuildingState.idleTime += __instance.GetSlowDeltaTime();
+            __result = __instance.ProductionBuildingState.idleTime > 0.2f;
+
+            return false;
         }
     }
 }
